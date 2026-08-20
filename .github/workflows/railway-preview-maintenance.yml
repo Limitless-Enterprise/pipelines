@@ -1,0 +1,104 @@
+name: Reusable Railway Preview Maintenance
+
+on:
+  workflow_call:
+    inputs:
+      openbao_kv_mount:
+        required: false
+        type: string
+        default: platform-secrets
+
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+
+jobs:
+  discover-open-preview-prs:
+    name: Discover open preview PRs
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.discover.outputs.matrix }}
+    steps:
+      - name: Checkout deployment repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - id: discover
+        name: Discover open deployment PRs
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          prs=$(gh pr list --state open --json number,headRefName,headRefOid --jq '[.[] | {number, branch: .headRefName, sha: .headRefOid}]')
+          echo "matrix={\"include\":${prs}}" >> "$GITHUB_OUTPUT"
+          echo "Discovered open deployment PRs: ${prs}"
+
+  maintain-preview-providers:
+    name: Maintain preview providers
+    needs: discover-open-preview-prs
+    if: needs.discover-open-preview-prs.outputs.matrix != '{"include":[]}'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.discover-open-preview-prs.outputs.matrix) }}
+    steps:
+      - name: Checkout deployment repository at preview SHA
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ matrix.sha }}
+      - id: context
+        name: Resolve preview context
+        shell: bash
+        env:
+          OPENBAO_KV_MOUNT: ${{ inputs.openbao_kv_mount }}
+          DEPLOYMENT_PR_NUMBER: ${{ matrix.number }}
+          DEPLOYMENT_PR_BRANCH: ${{ matrix.branch }}
+        run: |
+          scripts/pr-preview/context.py \
+            --mode maintenance \
+            --deployment-pr-number "${DEPLOYMENT_PR_NUMBER}" \
+            --deployment-branch "${DEPLOYMENT_PR_BRANCH}" \
+            --is-first-open false
+      - name: Maintain existing Neon branch
+        if: steps.context.outputs.should_run == 'true' && steps.context.outputs.has_neon == 'true'
+        env:
+          OPENBAO_ADDR: ${{ secrets.OPENBAO_ADDR }}
+          OPENBAO_AUTH_PATH: ${{ vars.OPENBAO_AUTH_PATH || 'jwt' }}
+          OPENBAO_AUDIENCE: ${{ vars.OPENBAO_AUDIENCE || 'openbao' }}
+          OPENBAO_ROLE: ${{ vars.PR_PREVIEW_OPENBAO_ROLE || 'github-actions-railway-deployments-preview-integrations' }}
+          OPENBAO_KV_MOUNT: ${{ steps.context.outputs.openbao_kv_mount }}
+          NEON_SECRET_PATH: ${{ vars.NEON_PR_PREVIEW_SECRET_PATH || 'apps/platform/development/pr/_automation/neon' }}
+          NEON_PROJECT_ID: ${{ vars.NEON_PROJECT_ID }}
+          NEON_BRANCH_NAME: pr-${{ steps.context.outputs.source_pr_number }}-${{ steps.context.outputs.railway_service_name }}
+        run: scripts/pr-preview/neon.sh maintenance
+      - name: Report Convex preview state
+        if: steps.context.outputs.should_run == 'true' && steps.context.outputs.has_convex == 'true'
+        env:
+          SOURCE_PR_NUMBER: ${{ steps.context.outputs.source_pr_number }}
+        run: scripts/pr-preview/convex.sh maintenance
+      - name: Write sanitized maintenance evidence
+        if: always() && steps.context.outputs.should_run == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPLOYMENT_PR_NUMBER: ${{ steps.context.outputs.deployment_pr_number }}
+          PREVIEW_CONTEXT_JSON: >-
+            {"deployment_service_root":"${{ steps.context.outputs.deployment_service_root }}","railway_service_name":"${{ steps.context.outputs.railway_service_name }}","railway_environment":"${{ steps.context.outputs.railway_environment }}","source_repository":"${{ steps.context.outputs.source_repository }}","source_pr_number":"${{ steps.context.outputs.source_pr_number }}","source_sha":"${{ steps.context.outputs.source_sha }}"}
+          PREVIEW_STATUS_JSON: '{"workflow":"maintenance"}'
+        run: scripts/pr-preview/evidence.py --phase maintenance --pr "${DEPLOYMENT_PR_NUMBER}" --comment
+      - name: Summarize provider maintenance
+        if: always()
+        env:
+          PR_NUMBER: ${{ matrix.number }}
+          BRANCH: ${{ matrix.branch }}
+          SHOULD_RUN: ${{ steps.context.outputs.should_run || 'false' }}
+          SKIP_REASON: ${{ steps.context.outputs.skip_reason || '' }}
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+          Preview maintenance checked deployment PR #${PR_NUMBER} (${BRANCH}).
+
+          should_run=${SHOULD_RUN}
+          skip_reason=${SKIP_REASON}
+
+          Maintenance reports existing provider state and extends existing Neon branch expiry when present. It does not proactively recreate missing Neon or Convex preview resources.
+          EOF

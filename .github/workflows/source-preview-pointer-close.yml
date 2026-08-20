@@ -1,0 +1,74 @@
+name: Reusable Source Preview Pointer Close
+
+on:
+  workflow_call:
+    inputs:
+      deployments_repo:
+        required: false
+        type: string
+        default: Limitless-Enterprise/railway-deployments
+      deployments_service:
+        required: true
+        type: string
+      pipelines_ref:
+        required: false
+        type: string
+        default: ci/pr-preview-central-pipelines-t_65462813
+    secrets:
+      OPENBAO_ADDR:
+        required: true
+      OPENBAO_AUTH_PATH:
+        required: false
+      OPENBAO_AUDIENCE:
+        required: false
+      OPENBAO_ROLE:
+        required: false
+      OPENBAO_SECRET_PATH:
+        required: false
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  close-preview-pointer:
+    name: Close deployment preview pointer
+    if: (github.event.pull_request.number || github.event.inputs.source_pr) != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: read
+    env:
+      DEPLOYMENTS_REPO: ${{ inputs.deployments_repo }}
+      DEPLOYMENTS_SERVICE: ${{ inputs.deployments_service }}
+      SOURCE_PR_NUMBER: ${{ github.event.pull_request.number || github.event.inputs.source_pr }}
+    steps:
+      - name: Checkout central pipelines automation
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: Limitless-Enterprise/pipelines
+          ref: ${{ inputs.pipelines_ref }}
+          path: pipelines
+      - name: Mint railway-deployments GitHub App token from OpenBao
+        shell: bash
+        run: bash pipelines/scripts/source-preview/mint-deployments-token.sh
+        env:
+          OPENBAO_ADDR: ${{ secrets.OPENBAO_ADDR }}
+          OPENBAO_AUTH_PATH: ${{ secrets.OPENBAO_AUTH_PATH }}
+          OPENBAO_AUDIENCE: ${{ secrets.OPENBAO_AUDIENCE }}
+          OPENBAO_ROLE: ${{ secrets.OPENBAO_ROLE }}
+          OPENBAO_SECRET_PATH: ${{ secrets.OPENBAO_SECRET_PATH }}
+      - name: Close railway-deployments preview PR
+        id: close_preview
+        shell: bash
+        run: bash pipelines/scripts/source-preview/close-railway-preview-pointer.sh
+      - name: Summarize close decision
+        shell: bash
+        run: |
+          {
+            echo "## Preview pointer close"
+            echo "- source_pr: \`${SOURCE_PR_NUMBER}\`"
+            echo "- deployment_pr: \`${{ steps.close_preview.outputs.deployment_pr_url || 'not-found' }}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"

@@ -1,0 +1,117 @@
+name: Reusable Railway Preview Open/Update
+
+on:
+  workflow_call:
+    inputs:
+      openbao_kv_mount:
+        required: false
+        type: string
+        default: platform-secrets
+
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+
+jobs:
+  preview-open-update:
+    name: Railway preview open/update
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout deployment repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - id: context
+        name: Resolve preview context
+        shell: bash
+        env:
+          OPENBAO_KV_MOUNT: ${{ inputs.openbao_kv_mount }}
+          DEPLOYMENT_PR_NUMBER: ${{ github.event.pull_request.number || '' }}
+          DEPLOYMENT_PR_BRANCH: ${{ github.event.pull_request.head.ref || github.ref_name }}
+          IS_FIRST_OPEN: ${{ (github.event.action == 'opened' || github.event.action == 'reopened') && 'true' || 'false' }}
+        run: |
+          scripts/pr-preview/context.py \
+            --mode open-update \
+            --deployment-pr-number "${DEPLOYMENT_PR_NUMBER}" \
+            --deployment-branch "${DEPLOYMENT_PR_BRANCH}" \
+            --is-first-open "${IS_FIRST_OPEN}"
+
+      - name: Ensure OpenBao PR config
+        if: steps.context.outputs.should_run == 'true'
+        env:
+          OPENBAO_ADDR: ${{ secrets.OPENBAO_ADDR }}
+          OPENBAO_AUTH_PATH: ${{ vars.OPENBAO_AUTH_PATH || 'jwt' }}
+          OPENBAO_AUDIENCE: ${{ vars.OPENBAO_AUDIENCE || 'openbao' }}
+          OPENBAO_ROLE: ${{ vars.PR_PREVIEW_OPENBAO_ROLE || 'github-actions-railway-deployments-preview-integrations' }}
+          OPENBAO_KV_MOUNT: ${{ steps.context.outputs.openbao_kv_mount }}
+          OPENBAO_PR_SHARED_PATH: ${{ steps.context.outputs.openbao_pr_shared_path }}
+          OPENBAO_PR_SERVICE_PATH: ${{ steps.context.outputs.openbao_pr_service_path }}
+          OPENBAO_TEMPLATE_SHARED_PATH: ${{ steps.context.outputs.openbao_template_shared_path }}
+          OPENBAO_TEMPLATE_SERVICE_PATH: ${{ steps.context.outputs.openbao_template_service_path }}
+          IS_FIRST_OPEN: ${{ steps.context.outputs.is_first_open }}
+        run: scripts/pr-preview/openbao.sh ensure
+
+      - name: Ensure Neon branch and apply schema
+        if: steps.context.outputs.should_run == 'true' && steps.context.outputs.has_neon == 'true'
+        env:
+          OPENBAO_ADDR: ${{ secrets.OPENBAO_ADDR }}
+          OPENBAO_AUTH_PATH: ${{ vars.OPENBAO_AUTH_PATH || 'jwt' }}
+          OPENBAO_AUDIENCE: ${{ vars.OPENBAO_AUDIENCE || 'openbao' }}
+          OPENBAO_ROLE: ${{ vars.PR_PREVIEW_OPENBAO_ROLE || 'github-actions-railway-deployments-preview-integrations' }}
+          OPENBAO_KV_MOUNT: ${{ steps.context.outputs.openbao_kv_mount }}
+          OPENBAO_PR_SERVICE_PATH: ${{ steps.context.outputs.openbao_pr_service_path }}
+          NEON_SECRET_PATH: ${{ vars.NEON_PR_PREVIEW_SECRET_PATH || 'apps/platform/development/pr/_automation/neon' }}
+          NEON_PROJECT_ID: ${{ vars.NEON_PROJECT_ID }}
+          NEON_DATABASE_NAME: ${{ vars.NEON_DATABASE_NAME }}
+          NEON_ROLE_NAME: ${{ vars.NEON_ROLE_NAME }}
+          NEON_BRANCH_NAME: pr-${{ steps.context.outputs.source_pr_number }}-${{ steps.context.outputs.railway_service_name }}
+          RAILWAY_PR_SERVICES: ${{ steps.context.outputs.railway_service_name }}
+          SOURCE_REPOSITORY: ${{ steps.context.outputs.source_repository }}
+          SOURCE_SHA: ${{ steps.context.outputs.source_sha }}
+          SOURCE_SUBDIR: ${{ steps.context.outputs.source_subdir }}
+          SOURCE_READER_SECRET_PATH: ${{ vars.SOURCE_READER_SECRET_PATH }}
+        run: scripts/pr-preview/neon.sh ensure-and-apply-schema
+
+      - name: Sync Convex preview
+        if: steps.context.outputs.should_run == 'true' && steps.context.outputs.has_convex == 'true'
+        env:
+          OPENBAO_ADDR: ${{ secrets.OPENBAO_ADDR }}
+          OPENBAO_AUTH_PATH: ${{ vars.OPENBAO_AUTH_PATH || 'jwt' }}
+          OPENBAO_AUDIENCE: ${{ vars.OPENBAO_AUDIENCE || 'openbao' }}
+          OPENBAO_ROLE: ${{ vars.PR_PREVIEW_OPENBAO_ROLE || 'github-actions-railway-deployments-preview-integrations' }}
+          OPENBAO_KV_MOUNT: ${{ steps.context.outputs.openbao_kv_mount }}
+          OPENBAO_PR_SERVICE_PATH: ${{ steps.context.outputs.openbao_pr_service_path }}
+          SOURCE_REPOSITORY: ${{ steps.context.outputs.source_repository }}
+          SOURCE_SHA: ${{ steps.context.outputs.source_sha }}
+          SOURCE_SUBDIR: ${{ steps.context.outputs.source_subdir }}
+          SOURCE_PR_NUMBER: ${{ steps.context.outputs.source_pr_number }}
+          CONVEX_DEPLOY_KEY: ${{ secrets.CONVEX_DEPLOY_KEY }}
+          SOURCE_REPO_TOKEN: ${{ secrets.SOURCE_REPO_TOKEN }}
+        run: scripts/pr-preview/convex.sh sync
+
+      - name: Redeploy Railway PR service
+        if: steps.context.outputs.should_run == 'true'
+        env:
+          OPENBAO_ADDR: ${{ secrets.OPENBAO_ADDR }}
+          OPENBAO_AUTH_PATH: ${{ vars.OPENBAO_AUTH_PATH || 'jwt' }}
+          OPENBAO_AUDIENCE: ${{ vars.OPENBAO_AUDIENCE || 'openbao' }}
+          OPENBAO_ROLE: ${{ vars.PR_PREVIEW_OPENBAO_ROLE || 'github-actions-railway-deployments-preview-integrations' }}
+          OPENBAO_KV_MOUNT: ${{ steps.context.outputs.openbao_kv_mount }}
+          RAILWAY_SECRET_PATH: ${{ vars.RAILWAY_PR_PREVIEW_SECRET_PATH || 'apps/platform/development/pr/_automation/railway' }}
+          RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
+          RAILWAY_SERVICE_NAME: ${{ steps.context.outputs.railway_service_name }}
+          RAILWAY_ENVIRONMENT: ${{ steps.context.outputs.railway_environment }}
+        run: scripts/pr-preview/railway-redeploy.sh
+
+      - name: Write sanitized preview evidence
+        if: always() && steps.context.outputs.should_run == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPLOYMENT_PR_NUMBER: ${{ steps.context.outputs.deployment_pr_number }}
+          PREVIEW_CONTEXT_JSON: >-
+            {"deployment_service_root":"${{ steps.context.outputs.deployment_service_root }}","railway_service_name":"${{ steps.context.outputs.railway_service_name }}","railway_environment":"${{ steps.context.outputs.railway_environment }}","source_repository":"${{ steps.context.outputs.source_repository }}","source_pr_number":"${{ steps.context.outputs.source_pr_number }}","source_sha":"${{ steps.context.outputs.source_sha }}"}
+          PREVIEW_STATUS_JSON: '{"workflow":"completed"}'
+        run: scripts/pr-preview/evidence.py --phase open-update --pr "${DEPLOYMENT_PR_NUMBER}" --comment
