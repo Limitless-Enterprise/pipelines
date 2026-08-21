@@ -1,0 +1,20 @@
+name: Auth Placeholder Regression
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  auth-placeholder-regression:
+    name: Auth placeholder regression
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Check runtime auth placeholders
+        run: python3 scripts/check-auth-placeholders.py
