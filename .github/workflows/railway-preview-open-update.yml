@@ -22,7 +22,15 @@ jobs:
       - name: Checkout deployment repository
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          path: deployment
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Checkout shared pipelines repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: Limitless-Enterprise/pipelines
+          ref: ${{ github.workflow_sha }}
+          path: pipelines
 
       - id: context
         name: Resolve preview context
@@ -33,7 +41,8 @@ jobs:
           DEPLOYMENT_PR_BRANCH: ${{ github.event.pull_request.head.ref || github.ref_name }}
           IS_FIRST_OPEN: ${{ (github.event.action == 'opened' || github.event.action == 'reopened') && 'true' || 'false' }}
         run: |
-          scripts/pr-preview/context.py \
+          deployment/scripts/pr-preview/context.py \
+            --root deployment \
             --mode open-update \
             --deployment-pr-number "${DEPLOYMENT_PR_NUMBER}" \
             --deployment-branch "${DEPLOYMENT_PR_BRANCH}" \
@@ -52,7 +61,7 @@ jobs:
           OPENBAO_TEMPLATE_SHARED_PATH: ${{ steps.context.outputs.openbao_template_shared_path }}
           OPENBAO_TEMPLATE_SERVICE_PATH: ${{ steps.context.outputs.openbao_template_service_path }}
           IS_FIRST_OPEN: ${{ steps.context.outputs.is_first_open }}
-        run: scripts/pr-preview/openbao.sh ensure
+        run: pipelines/scripts/preview-providers/openbao.sh ensure
 
       - name: Ensure Neon branch and apply schema
         if: steps.context.outputs.should_run == 'true' && steps.context.outputs.has_neon == 'true'
@@ -73,7 +82,8 @@ jobs:
           SOURCE_SHA: ${{ steps.context.outputs.source_sha }}
           SOURCE_SUBDIR: ${{ steps.context.outputs.source_subdir }}
           SOURCE_READER_SECRET_PATH: ${{ vars.SOURCE_READER_SECRET_PATH }}
-        run: scripts/pr-preview/neon.sh ensure-and-apply-schema
+          NEON_SCHEMA_COMMAND: cd deployment && scripts/pr-env/apply-neon-schema.sh
+        run: pipelines/scripts/preview-providers/neon.sh ensure-and-apply-schema
 
       - name: Sync Convex preview
         if: steps.context.outputs.should_run == 'true' && steps.context.outputs.has_convex == 'true'
@@ -90,7 +100,7 @@ jobs:
           SOURCE_PR_NUMBER: ${{ steps.context.outputs.source_pr_number }}
           CONVEX_DEPLOY_KEY: ${{ secrets.CONVEX_DEPLOY_KEY }}
           SOURCE_REPO_TOKEN: ${{ secrets.SOURCE_REPO_TOKEN }}
-        run: scripts/pr-preview/convex.sh sync
+        run: pipelines/scripts/preview-providers/convex.sh sync
 
       - name: Redeploy Railway PR service
         if: steps.context.outputs.should_run == 'true'
@@ -104,7 +114,7 @@ jobs:
           RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
           RAILWAY_SERVICE_NAME: ${{ steps.context.outputs.railway_service_name }}
           RAILWAY_ENVIRONMENT: ${{ steps.context.outputs.railway_environment }}
-        run: scripts/pr-preview/railway-redeploy.sh
+        run: deployment/scripts/pr-preview/railway-redeploy.sh
 
       - name: Write sanitized preview evidence
         if: always() && steps.context.outputs.should_run == 'true'
@@ -114,4 +124,4 @@ jobs:
           PREVIEW_CONTEXT_JSON: >-
             {"deployment_service_root":"${{ steps.context.outputs.deployment_service_root }}","railway_service_name":"${{ steps.context.outputs.railway_service_name }}","railway_environment":"${{ steps.context.outputs.railway_environment }}","source_repository":"${{ steps.context.outputs.source_repository }}","source_pr_number":"${{ steps.context.outputs.source_pr_number }}","source_sha":"${{ steps.context.outputs.source_sha }}"}
           PREVIEW_STATUS_JSON: '{"workflow":"completed"}'
-        run: scripts/pr-preview/evidence.py --phase open-update --pr "${DEPLOYMENT_PR_NUMBER}" --comment
+        run: pipelines/scripts/preview-providers/evidence.py --phase open-update --pr "${DEPLOYMENT_PR_NUMBER}" --comment

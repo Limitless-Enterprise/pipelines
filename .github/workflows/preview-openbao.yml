@@ -1,0 +1,62 @@
+name: Reusable Preview OpenBao Provider
+
+on:
+  workflow_call:
+    secrets:
+      OPENBAO_ADDR:
+        required: false
+    inputs:
+      action:
+        required: true
+        type: string
+      is_first_open:
+        required: false
+        type: string
+        default: "false"
+      openbao_kv_mount:
+        required: true
+        type: string
+      openbao_pr_shared_path:
+        required: true
+        type: string
+      openbao_pr_service_path:
+        required: true
+        type: string
+      openbao_template_shared_path:
+        required: false
+        type: string
+      openbao_template_service_path:
+        required: false
+        type: string
+    outputs:
+      config_changed:
+        value: ${{ jobs.openbao.outputs.config_changed }}
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  openbao:
+    runs-on: ubuntu-latest
+    outputs:
+      config_changed: ${{ steps.openbao.outputs.config_changed || steps.openbao.outputs.config_deleted || 'false' }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: Limitless-Enterprise/pipelines
+          ref: ${{ github.workflow_sha }}
+      - id: openbao
+        shell: bash
+        env:
+          OPENBAO_ADDR: ${{ secrets.OPENBAO_ADDR }}
+          OPENBAO_AUTH_PATH: ${{ vars.OPENBAO_AUTH_PATH || 'jwt' }}
+          OPENBAO_AUDIENCE: ${{ vars.OPENBAO_AUDIENCE || 'openbao' }}
+          OPENBAO_ROLE: ${{ vars.PR_PREVIEW_OPENBAO_ROLE || 'github-actions-railway-deployments-preview-integrations' }}
+          OPENBAO_KV_MOUNT: ${{ inputs.openbao_kv_mount }}
+          OPENBAO_PR_SHARED_PATH: ${{ inputs.openbao_pr_shared_path }}
+          OPENBAO_PR_SERVICE_PATH: ${{ inputs.openbao_pr_service_path }}
+          OPENBAO_TEMPLATE_SHARED_PATH: ${{ inputs.openbao_template_shared_path }}
+          OPENBAO_TEMPLATE_SERVICE_PATH: ${{ inputs.openbao_template_service_path }}
+          IS_FIRST_OPEN: ${{ inputs.is_first_open }}
+        run: scripts/preview-providers/openbao.sh '${{ inputs.action }}'
