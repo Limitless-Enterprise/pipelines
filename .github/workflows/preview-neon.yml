@@ -1,0 +1,68 @@
+name: Reusable Preview Neon Provider
+
+on:
+  workflow_call:
+    secrets:
+      OPENBAO_ADDR:
+        required: false
+    inputs:
+      action:
+        required: true
+        type: string
+      neon_branch_name:
+        required: true
+        type: string
+      openbao_kv_mount:
+        required: true
+        type: string
+      openbao_pr_service_path:
+        required: true
+        type: string
+      source_repository:
+        required: false
+        type: string
+        default: ""
+      source_sha:
+        required: false
+        type: string
+        default: ""
+      source_subdir:
+        required: false
+        type: string
+        default: "."
+      neon_schema_command:
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  neon:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: Limitless-Enterprise/pipelines
+          ref: ${{ github.workflow_sha }}
+      - shell: bash
+        env:
+          OPENBAO_ADDR: ${{ secrets.OPENBAO_ADDR }}
+          OPENBAO_AUTH_PATH: ${{ vars.OPENBAO_AUTH_PATH || 'jwt' }}
+          OPENBAO_AUDIENCE: ${{ vars.OPENBAO_AUDIENCE || 'openbao' }}
+          OPENBAO_ROLE: ${{ vars.PR_PREVIEW_OPENBAO_ROLE || 'github-actions-railway-deployments-preview-integrations' }}
+          OPENBAO_KV_MOUNT: ${{ inputs.openbao_kv_mount }}
+          OPENBAO_PR_SERVICE_PATH: ${{ inputs.openbao_pr_service_path }}
+          NEON_SECRET_PATH: ${{ vars.NEON_PR_PREVIEW_SECRET_PATH || 'apps/platform/development/pr/_automation/neon' }}
+          NEON_PROJECT_ID: ${{ vars.NEON_PROJECT_ID }}
+          NEON_DATABASE_NAME: ${{ vars.NEON_DATABASE_NAME }}
+          NEON_ROLE_NAME: ${{ vars.NEON_ROLE_NAME }}
+          NEON_BRANCH_NAME: ${{ inputs.neon_branch_name }}
+          SOURCE_REPOSITORY: ${{ inputs.source_repository }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          SOURCE_SUBDIR: ${{ inputs.source_subdir }}
+          SOURCE_READER_SECRET_PATH: ${{ vars.SOURCE_READER_SECRET_PATH }}
+          NEON_SCHEMA_COMMAND: ${{ inputs.neon_schema_command }}
+        run: scripts/preview-providers/neon.sh '${{ inputs.action }}'

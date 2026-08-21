@@ -1,6 +1,6 @@
 # PR preview shared pipelines
 
-This repository owns the reusable GitHub Actions contracts and generic helper scripts for Limitless owned-code Railway PR previews.
+This repository owns reusable GitHub Actions contracts and deployment-method-neutral preview provider modules for Limitless owned-code PR previews. Railway remains one adapter that composes these central modules with Railway-local service topology.
 
 ## Contents
 
@@ -22,7 +22,8 @@ Central `pipelines` owns:
 - reusable source-app quality workflow scaffolding and accepted branch-pair classification;
 - reusable source preview pointer open/update and close workflow contracts;
 - generic source-pointer helper scripts for same-SHA quality gating, OpenBao-backed Railway deploy-bot token minting, deployment-pointer PR upsert/close, and source PR comments;
-- reusable `railway-deployments` workflow contracts that call provider-specific scripts from the deployment repository.
+- deployment-method-neutral OpenBao, Neon, Convex, and sanitized evidence provider modules;
+- reusable `railway-deployments` workflow contracts that compose central provider modules with Railway-local context and redeploy adapter scripts.
 
 Consuming source app repositories still own:
 
@@ -34,9 +35,10 @@ Consuming source app repositories still own:
 `Limitless-Enterprise/railway-deployments` still owns:
 
 - Railway service roots and source pointer files;
-- provider-specific OpenBao, Neon, Convex, Railway redeploy, cleanup, maintenance, context parsing, and evidence scripts;
-- deployment-repo documentation for provider behavior and required setup;
-- control-plane authority over preview PRs and temporary provider resources.
+- Railway service/project/environment mapping and source pointer files;
+- Railway-native PR environment discovery/linking/redeploy adapter code;
+- app-specific schema hooks and deployment-repo documentation for Railway setup;
+- control-plane authority over preview PRs while delegating generic OpenBao/Neon/Convex lifecycle to central modules.
 
 ## Accepted behavior preserved
 
@@ -75,7 +77,8 @@ flowchart TD
   subgraph DeploymentRepo["Limitless-Enterprise/railway-deployments"]
     PointerPR["Preview pointer PR\nsource.env + .source.json only"]
     DeploymentWorkflows["Reusable railway preview workflows"]
-    ProviderScripts["Provider-specific scripts\ncontext, OpenBao, Neon, Convex, Railway, evidence"]
+    RailwayAdapter["Railway adapter\ncontext + redeploy"]
+    ProviderModules["Central provider modules\nOpenBao, Neon, Convex, evidence"]
   end
 
   subgraph Providers["Provider boundaries"]
@@ -97,11 +100,12 @@ flowchart TD
   PointerClose --> Helpers
   Helpers --> PointerPR
   PointerPR --> DeploymentWorkflows
-  DeploymentWorkflows --> ProviderScripts
-  ProviderScripts --> OpenBao
-  ProviderScripts --> Railway
-  ProviderScripts --> Neon
-  ProviderScripts --> Convex
+  DeploymentWorkflows --> RailwayAdapter
+  DeploymentWorkflows --> ProviderModules
+  RailwayAdapter --> Railway
+  ProviderModules --> OpenBao
+  ProviderModules --> Neon
+  ProviderModules --> Convex
 ```
 
 ## Source app PR quality
@@ -217,17 +221,18 @@ Purpose: run inside `railway-deployments` on a deployment pointer PR and prepare
 ```mermaid
 flowchart TD
   DeploymentPREvent["railway-deployments PR opened, reopened, synchronized, or updated"] --> CheckoutDeployment["Checkout deployment repo at PR head SHA"]
-  CheckoutDeployment --> Context["scripts/pr-preview/context.py\nmode=open-update"]
+  CheckoutDeployment --> CheckoutPipelines["Checkout central pipelines at workflow SHA"]
+  CheckoutPipelines --> Context["deployment/scripts/pr-preview/context.py\nmode=open-update"]
   Context --> ShouldRun{"Valid preview pointer context?"}
   ShouldRun -->|No| Skip["Skip provider work with context reason"]
-  ShouldRun -->|Yes| OpenBaoEnsure["Ensure OpenBao PR config\nshared + service paths under apps/<project>/development/pr"]
+  ShouldRun -->|Yes| OpenBaoEnsure["Central OpenBao module\nensure shared + service paths"]
   OpenBaoEnsure --> NeonGate{"Service has Neon preview?"}
-  NeonGate -->|Yes| NeonEnsure["Create/refresh Neon branch\nand apply schema"]
+  NeonGate -->|Yes| NeonEnsure["Central Neon module\ncreate/refresh branch + schema hook"]
   NeonGate -->|No| ConvexGate
   NeonEnsure --> ConvexGate{"Service has Convex preview?"}
-  ConvexGate -->|Yes| ConvexSync["Sync Convex preview from source SHA/subdir"]
+  ConvexGate -->|Yes| ConvexSync["Central Convex module\nsync preview by --preview-name"]
   ConvexGate -->|No| RailwayRedeploy
-  ConvexSync --> RailwayRedeploy["Redeploy Railway PR service"]
+  ConvexSync --> RailwayRedeploy["Railway-local redeploy adapter"]
   RailwayRedeploy --> RailwayNative["Railway native PR environment receives deployment-repo PR changes"]
   RailwayNative --> Evidence["Write sanitized preview evidence comment"]
   Skip --> End["End"]
@@ -236,8 +241,8 @@ flowchart TD
 
 Authority boundaries:
 
-- `railway-deployments` is the only repository in this flow that calls provider-specific scripts.
-- OpenBao path patching happens in the deployment repo under PR-scoped shared/service paths; the workflow references path names, not secret values.
+- Central `pipelines` owns OpenBao, Neon, Convex, and evidence provider scripts; `railway-deployments` supplies only Railway context and redeploy hooks.
+- OpenBao path patching happens under PR-scoped shared/service paths; workflows reference path names, not secret values.
 - Railway environment creation remains native to Railway PR environments tied to the deployment repo PR.
 - Neon and Convex work is conditional on service context discovered by the deployment repo.
 
@@ -250,16 +255,17 @@ Purpose: run inside `railway-deployments` when the deployment pointer PR closes 
 ```mermaid
 flowchart TD
   DeploymentPRClosed["railway-deployments PR closed"] --> CheckoutDeployment["Checkout deployment repo at PR head SHA"]
-  CheckoutDeployment --> Context["scripts/pr-preview/context.py\nmode=close"]
+  CheckoutDeployment --> CheckoutPipelines["Checkout central pipelines at workflow SHA"]
+  CheckoutPipelines --> Context["deployment/scripts/pr-preview/context.py\nmode=close"]
   Context --> ShouldRun{"Valid preview pointer context?"}
   ShouldRun -->|No| Skip["Skip cleanup with context reason"]
   ShouldRun -->|Yes| NeonGate{"Has Neon preview branch?"}
-  NeonGate -->|Yes| DeleteNeon["Delete Neon preview branch"]
+  NeonGate -->|Yes| DeleteNeon["Central Neon module\ndelete preview branch"]
   NeonGate -->|No| ConvexGate
   DeleteNeon --> ConvexGate{"Has Convex preview?"}
-  ConvexGate -->|Yes| DeleteConvex["Delete Convex preview"]
+  ConvexGate -->|Yes| DeleteConvex["Central Convex module\ndelete/report preview"]
   ConvexGate -->|No| DeleteOpenBao
-  DeleteConvex --> DeleteOpenBao["Delete OpenBao PR config\nshared + service paths"]
+  DeleteConvex --> DeleteOpenBao["Central OpenBao module\ndelete PR config"]
   DeleteOpenBao --> RailwayNative["Railway native PR environment is deleted by Railway because the PR closed"]
   RailwayNative --> Evidence["Write sanitized cleanup evidence comment"]
   Skip --> End["End"]
@@ -270,7 +276,7 @@ Key cleanup properties:
 
 - Cleanup is keyed by deployment PR context and source PR/service metadata resolved by the deployment repo.
 - Provider deletion scripts receive only the path names and identifiers they need; no secret material belongs in docs or committed pointer files.
-- Railway PR environment deletion stays native to Railway, while provider-side cleanup is explicitly handled by deployment scripts.
+- Railway PR environment deletion stays native to Railway, while OpenBao/Neon/Convex cleanup is handled by central provider modules.
 
 ## Daily preview maintenance
 
@@ -284,14 +290,15 @@ flowchart TD
   Discover --> Matrix{"Any open preview PRs?"}
   Matrix -->|No| DoneNoop["No-op\nno matrix jobs"]
   Matrix -->|Yes| ForEach["For each open PR\ncheckout deployment repo at PR SHA"]
-  ForEach --> Context["scripts/pr-preview/context.py\nmode=maintenance"]
+  ForEach --> CheckoutPipelines["Checkout central pipelines at workflow SHA"]
+  CheckoutPipelines --> Context["deployment/scripts/pr-preview/context.py\nmode=maintenance"]
   Context --> ShouldRun{"Valid preview pointer context?"}
   ShouldRun -->|No| SummarizeSkip["Summarize skip reason"]
   ShouldRun -->|Yes| NeonGate{"Existing Neon preview configured?"}
-  NeonGate -->|Yes| MaintainNeon["Maintain existing Neon branch\nextend/report if present"]
+  NeonGate -->|Yes| MaintainNeon["Central Neon module\nextend/report existing branch"]
   NeonGate -->|No| ConvexGate
   MaintainNeon --> ConvexGate{"Existing Convex preview configured?"}
-  ConvexGate -->|Yes| ReportConvex["Report Convex preview state"]
+  ConvexGate -->|Yes| ReportConvex["Central Convex module\nreport existing preview state"]
   ConvexGate -->|No| Evidence
   ReportConvex --> Evidence["Write sanitized maintenance evidence"]
   Evidence --> NoRecreate["Do not proactively recreate missing/expired Neon or Convex resources"]
@@ -313,4 +320,4 @@ Maintenance rules:
 - `source.env` in deployment pointer PRs carries source metadata only; it is not a secret handoff file.
 - OpenBao examples should name mounts and paths, not values. The expected PR config path shape is `platform-secrets/apps/<railway-project-name>/development/pr/...`.
 - Source app repositories keep thin workflow wrappers: they call the central reusable workflow and pass repo/service inputs, but they do not own deployment control-plane behavior.
-- `railway-deployments` remains the owner for Railway service roots, `.source.json`, `source.env`, provider scripts, and preview evidence comments.
+- `railway-deployments` remains the owner for Railway service roots, `.source.json`, `source.env`, service mapping, schema hook, and Railway redeploy adapter code. Central `pipelines` owns reusable OpenBao/Neon/Convex/evidence provider modules.

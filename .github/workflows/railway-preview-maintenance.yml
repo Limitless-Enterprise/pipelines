@@ -46,7 +46,14 @@ jobs:
       - name: Checkout deployment repository at preview SHA
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          path: deployment
           ref: ${{ matrix.sha }}
+      - name: Checkout shared pipelines repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: Limitless-Enterprise/pipelines
+          ref: ${{ github.workflow_sha }}
+          path: pipelines
       - id: context
         name: Resolve preview context
         shell: bash
@@ -55,7 +62,8 @@ jobs:
           DEPLOYMENT_PR_NUMBER: ${{ matrix.number }}
           DEPLOYMENT_PR_BRANCH: ${{ matrix.branch }}
         run: |
-          scripts/pr-preview/context.py \
+          deployment/scripts/pr-preview/context.py \
+            --root deployment \
             --mode maintenance \
             --deployment-pr-number "${DEPLOYMENT_PR_NUMBER}" \
             --deployment-branch "${DEPLOYMENT_PR_BRANCH}" \
@@ -71,12 +79,12 @@ jobs:
           NEON_SECRET_PATH: ${{ vars.NEON_PR_PREVIEW_SECRET_PATH || 'apps/platform/development/pr/_automation/neon' }}
           NEON_PROJECT_ID: ${{ vars.NEON_PROJECT_ID }}
           NEON_BRANCH_NAME: pr-${{ steps.context.outputs.source_pr_number }}-${{ steps.context.outputs.railway_service_name }}
-        run: scripts/pr-preview/neon.sh maintenance
+        run: pipelines/scripts/preview-providers/neon.sh maintenance
       - name: Report Convex preview state
         if: steps.context.outputs.should_run == 'true' && steps.context.outputs.has_convex == 'true'
         env:
           SOURCE_PR_NUMBER: ${{ steps.context.outputs.source_pr_number }}
-        run: scripts/pr-preview/convex.sh maintenance
+        run: pipelines/scripts/preview-providers/convex.sh maintenance
       - name: Write sanitized maintenance evidence
         if: always() && steps.context.outputs.should_run == 'true'
         env:
@@ -85,7 +93,7 @@ jobs:
           PREVIEW_CONTEXT_JSON: >-
             {"deployment_service_root":"${{ steps.context.outputs.deployment_service_root }}","railway_service_name":"${{ steps.context.outputs.railway_service_name }}","railway_environment":"${{ steps.context.outputs.railway_environment }}","source_repository":"${{ steps.context.outputs.source_repository }}","source_pr_number":"${{ steps.context.outputs.source_pr_number }}","source_sha":"${{ steps.context.outputs.source_sha }}"}
           PREVIEW_STATUS_JSON: '{"workflow":"maintenance"}'
-        run: scripts/pr-preview/evidence.py --phase maintenance --pr "${DEPLOYMENT_PR_NUMBER}" --comment
+        run: pipelines/scripts/preview-providers/evidence.py --phase maintenance --pr "${DEPLOYMENT_PR_NUMBER}" --comment
       - name: Summarize provider maintenance
         if: always()
         env:

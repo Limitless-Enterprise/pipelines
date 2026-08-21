@@ -22,7 +22,14 @@ jobs:
       - name: Checkout deployment repository
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          path: deployment
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Checkout shared pipelines repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: Limitless-Enterprise/pipelines
+          ref: ${{ github.workflow_sha }}
+          path: pipelines
       - id: context
         name: Resolve preview context
         shell: bash
@@ -31,7 +38,8 @@ jobs:
           DEPLOYMENT_PR_NUMBER: ${{ github.event.pull_request.number || '' }}
           DEPLOYMENT_PR_BRANCH: ${{ github.event.pull_request.head.ref || github.ref_name }}
         run: |
-          scripts/pr-preview/context.py \
+          deployment/scripts/pr-preview/context.py \
+            --root deployment \
             --mode close \
             --deployment-pr-number "${DEPLOYMENT_PR_NUMBER}" \
             --deployment-branch "${DEPLOYMENT_PR_BRANCH}"
@@ -46,13 +54,13 @@ jobs:
           NEON_SECRET_PATH: ${{ vars.NEON_PR_PREVIEW_SECRET_PATH || 'apps/platform/development/pr/_automation/neon' }}
           NEON_PROJECT_ID: ${{ vars.NEON_PROJECT_ID }}
           NEON_BRANCH_NAME: pr-${{ steps.context.outputs.source_pr_number }}-${{ steps.context.outputs.railway_service_name }}
-        run: scripts/pr-preview/neon.sh delete
+        run: pipelines/scripts/preview-providers/neon.sh delete
       - name: Delete Convex preview
         if: steps.context.outputs.should_run == 'true' && steps.context.outputs.has_convex == 'true'
         env:
           SOURCE_PR_NUMBER: ${{ steps.context.outputs.source_pr_number }}
           CONVEX_DEPLOY_KEY: ${{ secrets.CONVEX_DEPLOY_KEY }}
-        run: scripts/pr-preview/convex.sh delete
+        run: pipelines/scripts/preview-providers/convex.sh delete
       - name: Delete OpenBao PR config
         if: steps.context.outputs.should_run == 'true'
         env:
@@ -63,7 +71,7 @@ jobs:
           OPENBAO_KV_MOUNT: ${{ steps.context.outputs.openbao_kv_mount }}
           OPENBAO_PR_SHARED_PATH: ${{ steps.context.outputs.openbao_pr_shared_path }}
           OPENBAO_PR_SERVICE_PATH: ${{ steps.context.outputs.openbao_pr_service_path }}
-        run: scripts/pr-preview/openbao.sh delete
+        run: pipelines/scripts/preview-providers/openbao.sh delete
       - name: Write sanitized cleanup evidence
         if: always() && steps.context.outputs.should_run == 'true'
         env:
@@ -72,4 +80,4 @@ jobs:
           PREVIEW_CONTEXT_JSON: >-
             {"deployment_service_root":"${{ steps.context.outputs.deployment_service_root }}","railway_service_name":"${{ steps.context.outputs.railway_service_name }}","source_pr_number":"${{ steps.context.outputs.source_pr_number }}"}
           PREVIEW_STATUS_JSON: '{"workflow":"completed"}'
-        run: scripts/pr-preview/evidence.py --phase close --pr "${DEPLOYMENT_PR_NUMBER}" --comment
+        run: pipelines/scripts/preview-providers/evidence.py --phase close --pr "${DEPLOYMENT_PR_NUMBER}" --comment

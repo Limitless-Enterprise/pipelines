@@ -1,0 +1,69 @@
+name: Reusable Preview Convex Provider
+
+on:
+  workflow_call:
+    secrets:
+      OPENBAO_ADDR:
+        required: false
+      CONVEX_DEPLOY_KEY:
+        required: false
+      SOURCE_REPO_TOKEN:
+        required: false
+    inputs:
+      action:
+        required: true
+        type: string
+      source_repository:
+        required: false
+        type: string
+        default: ""
+      source_sha:
+        required: false
+        type: string
+        default: ""
+      source_subdir:
+        required: false
+        type: string
+        default: "."
+      source_pr_number:
+        required: true
+        type: string
+      openbao_kv_mount:
+        required: false
+        type: string
+        default: platform-secrets
+      openbao_pr_service_path:
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  convex:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: Limitless-Enterprise/pipelines
+          ref: ${{ github.workflow_sha }}
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: "22"
+      - shell: bash
+        env:
+          OPENBAO_ADDR: ${{ secrets.OPENBAO_ADDR }}
+          OPENBAO_AUTH_PATH: ${{ vars.OPENBAO_AUTH_PATH || 'jwt' }}
+          OPENBAO_AUDIENCE: ${{ vars.OPENBAO_AUDIENCE || 'openbao' }}
+          OPENBAO_ROLE: ${{ vars.PR_PREVIEW_OPENBAO_ROLE || 'github-actions-railway-deployments-preview-integrations' }}
+          OPENBAO_KV_MOUNT: ${{ inputs.openbao_kv_mount }}
+          OPENBAO_PR_SERVICE_PATH: ${{ inputs.openbao_pr_service_path }}
+          SOURCE_REPOSITORY: ${{ inputs.source_repository }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          SOURCE_SUBDIR: ${{ inputs.source_subdir }}
+          SOURCE_PR_NUMBER: ${{ inputs.source_pr_number }}
+          CONVEX_DEPLOY_KEY: ${{ secrets.CONVEX_DEPLOY_KEY }}
+          SOURCE_REPO_TOKEN: ${{ secrets.SOURCE_REPO_TOKEN }}
+        run: scripts/preview-providers/convex.sh '${{ inputs.action }}'
