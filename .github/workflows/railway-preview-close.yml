@@ -1,0 +1,75 @@
+name: Reusable Railway Preview Close
+
+on:
+  workflow_call:
+    inputs:
+      openbao_kv_mount:
+        required: false
+        type: string
+        default: platform-secrets
+
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+
+jobs:
+  preview-close:
+    name: Railway preview close
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout deployment repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - id: context
+        name: Resolve preview context
+        shell: bash
+        env:
+          OPENBAO_KV_MOUNT: ${{ inputs.openbao_kv_mount }}
+          DEPLOYMENT_PR_NUMBER: ${{ github.event.pull_request.number || '' }}
+          DEPLOYMENT_PR_BRANCH: ${{ github.event.pull_request.head.ref || github.ref_name }}
+        run: |
+          scripts/pr-preview/context.py \
+            --mode close \
+            --deployment-pr-number "${DEPLOYMENT_PR_NUMBER}" \
+            --deployment-branch "${DEPLOYMENT_PR_BRANCH}"
+      - name: Delete Neon preview branch
+        if: steps.context.outputs.should_run == 'true' && steps.context.outputs.has_neon == 'true'
+        env:
+          OPENBAO_ADDR: ${{ secrets.OPENBAO_ADDR }}
+          OPENBAO_AUTH_PATH: ${{ vars.OPENBAO_AUTH_PATH || 'jwt' }}
+          OPENBAO_AUDIENCE: ${{ vars.OPENBAO_AUDIENCE || 'openbao' }}
+          OPENBAO_ROLE: ${{ vars.PR_PREVIEW_OPENBAO_ROLE || 'github-actions-railway-deployments-preview-integrations' }}
+          OPENBAO_KV_MOUNT: ${{ steps.context.outputs.openbao_kv_mount }}
+          NEON_SECRET_PATH: ${{ vars.NEON_PR_PREVIEW_SECRET_PATH || 'apps/platform/development/pr/_automation/neon' }}
+          NEON_PROJECT_ID: ${{ vars.NEON_PROJECT_ID }}
+          NEON_BRANCH_NAME: pr-${{ steps.context.outputs.source_pr_number }}-${{ steps.context.outputs.railway_service_name }}
+        run: scripts/pr-preview/neon.sh delete
+      - name: Delete Convex preview
+        if: steps.context.outputs.should_run == 'true' && steps.context.outputs.has_convex == 'true'
+        env:
+          SOURCE_PR_NUMBER: ${{ steps.context.outputs.source_pr_number }}
+          CONVEX_DEPLOY_KEY: ${{ secrets.CONVEX_DEPLOY_KEY }}
+        run: scripts/pr-preview/convex.sh delete
+      - name: Delete OpenBao PR config
+        if: steps.context.outputs.should_run == 'true'
+        env:
+          OPENBAO_ADDR: ${{ secrets.OPENBAO_ADDR }}
+          OPENBAO_AUTH_PATH: ${{ vars.OPENBAO_AUTH_PATH || 'jwt' }}
+          OPENBAO_AUDIENCE: ${{ vars.OPENBAO_AUDIENCE || 'openbao' }}
+          OPENBAO_ROLE: ${{ vars.PR_PREVIEW_OPENBAO_ROLE || 'github-actions-railway-deployments-preview-integrations' }}
+          OPENBAO_KV_MOUNT: ${{ steps.context.outputs.openbao_kv_mount }}
+          OPENBAO_PR_SHARED_PATH: ${{ steps.context.outputs.openbao_pr_shared_path }}
+          OPENBAO_PR_SERVICE_PATH: ${{ steps.context.outputs.openbao_pr_service_path }}
+        run: scripts/pr-preview/openbao.sh delete
+      - name: Write sanitized cleanup evidence
+        if: always() && steps.context.outputs.should_run == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPLOYMENT_PR_NUMBER: ${{ steps.context.outputs.deployment_pr_number }}
+          PREVIEW_CONTEXT_JSON: >-
+            {"deployment_service_root":"${{ steps.context.outputs.deployment_service_root }}","railway_service_name":"${{ steps.context.outputs.railway_service_name }}","source_pr_number":"${{ steps.context.outputs.source_pr_number }}"}
+          PREVIEW_STATUS_JSON: '{"workflow":"completed"}'
+        run: scripts/pr-preview/evidence.py --phase close --pr "${DEPLOYMENT_PR_NUMBER}" --comment

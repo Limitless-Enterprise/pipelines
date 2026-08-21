@@ -1,0 +1,138 @@
+name: Reusable Source Preview Pointer Open/Update
+
+on:
+  workflow_call:
+    inputs:
+      deployments_repo:
+        required: false
+        type: string
+        default: Limitless-Enterprise/railway-deployments
+      deployments_project:
+        required: true
+        type: string
+      deployments_service:
+        required: true
+        type: string
+      source_subdir:
+        required: true
+        type: string
+      quality_workflow_file:
+        required: false
+        type: string
+        default: app-pr-quality.yml
+      pipelines_ref:
+        required: false
+        type: string
+        default: ci/pr-preview-central-pipelines-t_65462813
+    secrets:
+      OPENBAO_ADDR:
+        required: true
+      OPENBAO_AUTH_PATH:
+        required: false
+      OPENBAO_AUDIENCE:
+        required: false
+      OPENBAO_ROLE:
+        required: false
+      OPENBAO_SECRET_PATH:
+        required: false
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  validate-preview-eligibility:
+    name: Validate preview eligibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      should_publish: ${{ steps.validate.outputs.should_publish }}
+      skip_reason: ${{ steps.validate.outputs.skip_reason }}
+      source_pr_number: ${{ steps.validate.outputs.source_pr_number }}
+      source_pr_url: ${{ steps.validate.outputs.source_pr_url }}
+      source_base: ${{ steps.validate.outputs.source_base }}
+      source_head: ${{ steps.validate.outputs.source_head }}
+      source_sha: ${{ steps.validate.outputs.source_sha }}
+      source_ref: ${{ steps.validate.outputs.source_ref }}
+      preview_kind: ${{ steps.validate.outputs.preview_kind }}
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+    steps:
+      - name: Checkout central pipelines automation
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: Limitless-Enterprise/pipelines
+          ref: ${{ inputs.pipelines_ref }}
+          path: pipelines
+      - name: Validate source PR and quality SHA
+        id: validate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_PR_INPUT: ${{ github.event.inputs.source_pr || '' }}
+          QUALITY_WORKFLOW_FILE: ${{ inputs.quality_workflow_file }}
+        run: bash pipelines/scripts/source-preview/validate-preview-pointer-event.sh
+      - name: Summarize skip
+        if: steps.validate.outputs.should_publish != 'true'
+        shell: bash
+        run: |
+          {
+            echo "## Preview pointer skipped"
+            echo
+            echo "${{ steps.validate.outputs.skip_reason }}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  trusted-publish-pointer:
+    name: Publish deployment preview pointer
+    needs: validate-preview-eligibility
+    if: needs.validate-preview-eligibility.outputs.should_publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+    env:
+      DEPLOYMENTS_REPO: ${{ inputs.deployments_repo }}
+      DEPLOYMENTS_PROJECT: ${{ inputs.deployments_project }}
+      DEPLOYMENTS_SERVICE: ${{ inputs.deployments_service }}
+      SOURCE_REPOSITORY: ${{ github.repository }}
+      SOURCE_SUBDIR: ${{ inputs.source_subdir }}
+      SOURCE_PR_NUMBER: ${{ needs.validate-preview-eligibility.outputs.source_pr_number }}
+      SOURCE_PR_URL: ${{ needs.validate-preview-eligibility.outputs.source_pr_url }}
+      SOURCE_PR_BASE: ${{ needs.validate-preview-eligibility.outputs.source_base }}
+      SOURCE_PR_HEAD: ${{ needs.validate-preview-eligibility.outputs.source_head }}
+      SOURCE_SHA: ${{ needs.validate-preview-eligibility.outputs.source_sha }}
+      SOURCE_REF: ${{ needs.validate-preview-eligibility.outputs.source_ref }}
+      PREVIEW_KIND: ${{ needs.validate-preview-eligibility.outputs.preview_kind }}
+    steps:
+      - name: Checkout central pipelines automation
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: Limitless-Enterprise/pipelines
+          ref: ${{ inputs.pipelines_ref }}
+          path: pipelines
+      - name: Mint railway-deployments GitHub App token from OpenBao
+        shell: bash
+        run: bash pipelines/scripts/source-preview/mint-deployments-token.sh
+        env:
+          OPENBAO_ADDR: ${{ secrets.OPENBAO_ADDR }}
+          OPENBAO_AUTH_PATH: ${{ secrets.OPENBAO_AUTH_PATH }}
+          OPENBAO_AUDIENCE: ${{ secrets.OPENBAO_AUDIENCE }}
+          OPENBAO_ROLE: ${{ secrets.OPENBAO_ROLE }}
+          OPENBAO_SECRET_PATH: ${{ secrets.OPENBAO_SECRET_PATH }}
+      - name: Create or update railway-deployments preview PR
+        id: deployment_preview
+        shell: bash
+        run: bash pipelines/scripts/source-preview/publish-railway-preview-pointer.sh
+        env:
+          SOURCE_RECHECK_TOKEN: ${{ github.token }}
+      - name: Upsert source PR preview comment
+        if: steps.deployment_preview.outputs.deployment_pr_url != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPLOYMENT_PR_URL: ${{ steps.deployment_preview.outputs.deployment_pr_url }}
+        run: bash pipelines/scripts/source-preview/upsert-source-preview-comment.sh

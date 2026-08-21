@@ -1,0 +1,121 @@
+name: Reusable Source App PR Quality
+
+on:
+  workflow_call:
+    inputs:
+      working_directory:
+        description: "Repository-relative directory where Node/pnpm quality commands run."
+        required: true
+        type: string
+      cache_dependency_path:
+        description: "Repository-relative pnpm lockfile path used by setup-node caching."
+        required: true
+        type: string
+      quality_commands:
+        description: "Repository-specific read-only quality commands to run after dependency install."
+        required: true
+        type: string
+      node_version:
+        description: "Node.js version for the quality job."
+        required: false
+        type: string
+        default: "22"
+      pnpm_version:
+        description: "pnpm version activated with corepack."
+        required: false
+        type: string
+        default: "10.13.1"
+
+permissions:
+  contents: read
+
+jobs:
+  classify-pr:
+    name: Classify preview eligibility
+    runs-on: ubuntu-latest
+    outputs:
+      eligible: ${{ steps.classify.outputs.eligible }}
+      preview_kind: ${{ steps.classify.outputs.preview_kind }}
+    steps:
+      - name: Validate accepted branch pairing
+        id: classify
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.event.pull_request.base.ref || '' }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref || github.ref_name }}
+          IS_DRAFT: ${{ github.event.pull_request.draft || false }}
+        run: |
+          set -euo pipefail
+          eligible=false
+          preview_kind="none"
+
+          if [ "${EVENT_NAME}" != "pull_request" ]; then
+            echo "Push/manual quality run; branch-pair eligibility is evaluated on pull_request runs."
+            echo "eligible=false" >> "${GITHUB_OUTPUT}"
+            echo "preview_kind=${preview_kind}" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          if [ "${IS_DRAFT}" = "true" ]; then
+            echo "Draft PRs run quality checks but do not publish previews until ready_for_review."
+            echo "eligible=false" >> "${GITHUB_OUTPUT}"
+            echo "preview_kind=${preview_kind}" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          if [[ "${HEAD_REF}" =~ ^(feature|fix)/ && "${BASE_REF}" =~ ^release/ ]]; then
+            eligible=true
+            preview_kind="release-pr"
+          elif [[ "${HEAD_REF}" =~ ^hotfix/ && "${BASE_REF}" = "main" ]]; then
+            eligible=true
+            preview_kind="hotfix-main-pr"
+          elif [[ "${HEAD_REF}" =~ ^(feature|fix)/ && "${BASE_REF}" = "main" ]]; then
+            echo "::error::feature/* and fix/* PRs must target release/*, not main."
+            exit 1
+          elif [[ "${HEAD_REF}" =~ ^hotfix/ && "${BASE_REF}" =~ ^release/ ]]; then
+            echo "::error::hotfix/* PRs must target main, not release/*."
+            exit 1
+          else
+            echo "PR head '${HEAD_REF}' targeting '${BASE_REF}' is not preview-eligible; running quality checks only."
+          fi
+
+          echo "eligible=${eligible}" >> "${GITHUB_OUTPUT}"
+          echo "preview_kind=${preview_kind}" >> "${GITHUB_OUTPUT}"
+
+  app-quality:
+    name: App lint, typecheck, and build
+    needs: classify-pr
+    if: always() && !cancelled() && needs.classify-pr.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Setup pnpm
+        shell: bash
+        run: |
+          set -euo pipefail
+          corepack enable
+          corepack prepare pnpm@${{ inputs.pnpm_version }} --activate
+          pnpm --version
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: pnpm
+          cache-dependency-path: ${{ inputs.cache_dependency_path }}
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run repository quality commands
+        shell: bash
+        run: ${{ inputs.quality_commands }}
