@@ -7,6 +7,16 @@ on:
         required: false
         type: string
         default: platform-secrets
+      pipelines_ref:
+        required: false
+        type: string
+        default: main
+
+    secrets:
+      OPENBAO_ADDR:
+        required: true
+      CONVEX_DEPLOY_KEY:
+        required: false
 
 permissions:
   contents: read
@@ -28,7 +38,7 @@ jobs:
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           repository: Limitless-Enterprise/pipelines
-          ref: ${{ github.workflow_sha }}
+          ref: ${{ inputs.pipelines_ref }}
           path: pipelines
       - id: context
         name: Resolve preview context
