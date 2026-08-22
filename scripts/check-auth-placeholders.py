@@ -13,8 +13,9 @@ PLACEHOLDERS = [
     "ACTI" + "..." + "KEN",
     "SOUR" + "..." + "EN",
     "DEPL" + "..." + "git",
-    "x-access-token:" + "***",
-    "AUTHORIZATION: basic " + "***",
+    "x-access-token:***",
+    "Bearer ***",
+    "AUTHORIZATION: basic ***",
 ]
 EXTENSIONS = {".sh", ".py", ".yml", ".yaml"}
 

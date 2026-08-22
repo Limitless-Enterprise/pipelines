@@ -54,15 +54,14 @@ mint_openbao_token() {
   local auth_path="${OPENBAO_AUTH_PATH:-jwt}"
   local audience="${OPENBAO_AUDIENCE:-openbao}"
   local role="${OPENBAO_ROLE:-github-actions-railway-deployments-preview-integrations}"
-  local oidc_response oidc_jwt login_payload openbao_token oidc_url
+  local oidc_response oidc_jwt login_payload openbao_token
   if [ -n "${OPENBAO_TOKEN:-}" ]; then
     mask_if_set "${OPENBAO_TOKEN}"
     printf '%s' "${OPENBAO_TOKEN}"
     return 0
   fi
   require_env ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL || exit 1
-  oidc_url="${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${audience}"
-  oidc_response=$(retry_curl --header "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "${oidc_url}")
+  oidc_response=$(retry_curl --get --header "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" --data-urlencode "audience=${audience}" "${ACTIONS_ID_TOKEN_REQUEST_URL}")
   oidc_jwt=$(jq -r '.value // empty' <<<"${oidc_response}")
   if [ -z "${oidc_jwt}" ]; then
     echo "::error::GitHub did not return an OIDC token." >&2
