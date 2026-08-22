@@ -34,6 +34,8 @@ class SourcePreviewContractsTest(unittest.TestCase):
         script = read("scripts/source-preview/close-railway-preview-pointer.sh")
 
         self.assertIn('lookup_open_preview_pr()', script)
+        self.assertIn('export GH_TOKEN="${DEPLOYMENTS_REPO_TOKEN}"', script)
+        self.assertIn('unset GITHUB_TOKEN', script)
         self.assertIn('CLOSE_POINTER_LOOKUP_ATTEMPTS:-6', script)
         self.assertIn('CLOSE_POINTER_LOOKUP_SLEEP_SECONDS:-10', script)
         self.assertIn('for attempt in $(seq 1 "${lookup_attempts}")', script)
@@ -46,6 +48,14 @@ class SourcePreviewContractsTest(unittest.TestCase):
 
         self.assertLess(retry_loop, absent_exit)
         self.assertLess(absent_exit, close_patch)
+
+    def test_deployments_token_requests_pr_permissions_for_deployment_repo(self) -> None:
+        script = read("scripts/source-preview/mint-deployments-token.sh")
+
+        self.assertIn('deployments_repo_name="${DEPLOYMENTS_REPO##*/}"', script)
+        self.assertIn('repositories: [$repository]', script)
+        self.assertIn('contents: "write"', script)
+        self.assertIn('pull_requests: "write"', script)
 
     def test_source_preview_workflows_keep_pinned_checkout_and_explicit_secrets(self) -> None:
         open_update = read(".github/workflows/source-preview-pointer-open-update.yml")
