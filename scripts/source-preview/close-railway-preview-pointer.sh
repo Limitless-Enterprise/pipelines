@@ -10,9 +10,26 @@ preview_branch="preview/${DEPLOYMENTS_SERVICE}/${SOURCE_PR_NUMBER}"
 export GH_TOKEN="${DEPLOYMENTS_REPO_TOKEN}"
 repo_owner="${DEPLOYMENTS_REPO%%/*}"
 
-existing_pr_number=$(gh api "repos/${DEPLOYMENTS_REPO}/pulls?head=${repo_owner}:${preview_branch}&state=open" --jq '.[0].number // empty')
+lookup_open_preview_pr() {
+  gh api "repos/${DEPLOYMENTS_REPO}/pulls?head=${repo_owner}:${preview_branch}&state=open" --jq '.[0].number // empty'
+}
+
+lookup_attempts="${CLOSE_POINTER_LOOKUP_ATTEMPTS:-6}"
+lookup_sleep_seconds="${CLOSE_POINTER_LOOKUP_SLEEP_SECONDS:-10}"
+existing_pr_number=""
+for attempt in $(seq 1 "${lookup_attempts}"); do
+  existing_pr_number=$(lookup_open_preview_pr)
+  if [ -n "${existing_pr_number}" ]; then
+    break
+  fi
+  if [ "${attempt}" -lt "${lookup_attempts}" ]; then
+    echo "No open deployment preview PR found for ${preview_branch} on attempt ${attempt}/${lookup_attempts}; retrying in ${lookup_sleep_seconds}s."
+    sleep "${lookup_sleep_seconds}"
+  fi
+done
+
 if [ -z "${existing_pr_number}" ]; then
-  echo "No open deployment preview PR found for ${preview_branch}."
+  echo "No open deployment preview PR found for ${preview_branch} after ${lookup_attempts} lookup attempts."
   if [ -n "${GITHUB_OUTPUT:-}" ]; then
     printf 'deployment_pr_url=\n' >> "${GITHUB_OUTPUT}"
   fi

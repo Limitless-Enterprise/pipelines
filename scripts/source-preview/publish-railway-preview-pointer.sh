@@ -31,6 +31,39 @@ trap 'rm -rf "${workdir}"' EXIT
 
 export GH_TOKEN="${DEPLOYMENTS_REPO_TOKEN}"
 
+recheck_source_pr() {
+  local phase="$1" pr_json current_state current_draft current_sha current_base current_head current_repo
+  if [ -z "${SOURCE_RECHECK_TOKEN:-}" ]; then
+    echo "::error::SOURCE_RECHECK_TOKEN is required to recheck source PR state before publishing deployment preview pointers."
+    exit 1
+  fi
+  pr_json=$(GH_TOKEN="${SOURCE_RECHECK_TOKEN}" gh api "repos/${SOURCE_REPOSITORY}/pulls/${SOURCE_PR_NUMBER}")
+  current_state=$(jq -r '.state' <<<"${pr_json}")
+  current_draft=$(jq -r '.draft' <<<"${pr_json}")
+  current_sha=$(jq -r '.head.sha' <<<"${pr_json}")
+  current_base=$(jq -r '.base.ref' <<<"${pr_json}")
+  current_head=$(jq -r '.head.ref' <<<"${pr_json}")
+  current_repo=$(jq -r '.head.repo.full_name' <<<"${pr_json}")
+
+  if [ "${current_state}" != "open" ]; then
+    echo "::error::Source PR #${SOURCE_PR_NUMBER} is ${current_state} during ${phase}; refusing to publish preview pointer."
+    exit 1
+  fi
+  if [ "${current_draft}" = "true" ]; then
+    echo "::error::Source PR #${SOURCE_PR_NUMBER} is draft during ${phase}; refusing to publish preview pointer."
+    exit 1
+  fi
+  if [ "${current_repo}" != "${SOURCE_REPOSITORY}" ]; then
+    echo "::error::Source PR #${SOURCE_PR_NUMBER} head repo changed to ${current_repo} during ${phase}; expected ${SOURCE_REPOSITORY}."
+    exit 1
+  fi
+  if [ "${current_sha}" != "${SOURCE_SHA}" ] || [ "${current_base}" != "${SOURCE_PR_BASE}" ] || [ "${current_head}" != "${SOURCE_PR_HEAD}" ]; then
+    echo "::error::Source PR #${SOURCE_PR_NUMBER} changed during ${phase}; expected ${SOURCE_PR_HEAD}->${SOURCE_PR_BASE}@${SOURCE_SHA}, got ${current_head}->${current_base}@${current_sha}."
+    exit 1
+  fi
+  echo "Source PR #${SOURCE_PR_NUMBER} rechecked during ${phase}: ${current_head}->${current_base}@${current_sha}."
+}
+
 git clone "https://x-access-token:${DEPLOYMENTS_REPO_TOKEN}@github.com/${DEPLOYMENTS_REPO}.git" "${workdir}/railway-deployments"
 cd "${workdir}/railway-deployments"
 git config user.name "railway-deploy-bot[bot]"
@@ -44,6 +77,7 @@ fi
 
 target="${service_root}"
 mkdir -p "${target}"
+recheck_source_pr "before-writing-pointer"
 printf 'SOURCE_REPOSITORY=%s\nSOURCE_SHA=%s\nSOURCE_REF=%s\nSOURCE_SUBDIR=%s\nSOURCE_PR=%s\nSOURCE_PR_BASE=%s\nSOURCE_PR_URL=%s\nDEPLOYMENT_MODE=preview\nPREVIEW_KIND=%s\n' \
   "${SOURCE_REPOSITORY}" \
   "${SOURCE_SHA}" \
@@ -71,6 +105,7 @@ jq -n \
   '{repository: $repository, sha: $sha, ref: $ref, source_subdir: $source_subdir, source_pr: $source_pr, source_pr_url: $source_pr_url, source_pr_base: $source_pr_base, source_pr_head: $source_pr_head, deployment_mode: $deployment_mode, preview_kind: $preview_kind, run_url: $run_url, published_at: $published_at}' \
   > "${target}/.source.json"
 
+recheck_source_pr "after-writing-pointer"
 git add "${target}/source.env" "${target}/.source.json"
 if git diff --cached --quiet; then
   echo "No deployment preview pointer changes to publish."
