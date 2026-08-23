@@ -17,7 +17,7 @@ auth_path="${OPENBAO_AUTH_PATH:-jwt}"
 audience="${OPENBAO_AUDIENCE:-openbao}"
 role="${OPENBAO_ROLE:-github-actions-railway-deployments-${repo_name}}"
 secret_path="${OPENBAO_SECRET_PATH:-secret/data/github-apps/railway-deploy-bot}"
-deployments_repo_name="${DEPLOYMENTS_REPO##*/}"
+
 
 retry_curl() {
   local attempt delay body_file status curl_exit
@@ -103,7 +103,6 @@ deployments_token=$(retry_curl \
   --header "Accept: application/vnd.github+json" \
   --header "Authorization: Bearer ${app_jwt}" \
   --header "X-GitHub-Api-Version: 2022-11-28" \
-  --data "$(jq -cn --arg repository "${deployments_repo_name}" '{repositories: [$repository], permissions: {contents: "write", pull_requests: "write"}}')" \
   "https://api.github.com/app/installations/${installation_id}/access_tokens" | jq -r '.token // empty')
 if [ -z "${deployments_token}" ]; then
   echo "::error::GitHub App installation token minting failed."
