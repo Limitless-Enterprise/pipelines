@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+: "${DEPLOYMENTS_REPO:?DEPLOYMENTS_REPO is required}"
+
 if [ -z "${OPENBAO_ADDR:-}" ]; then
   echo "::error::OPENBAO_ADDR is required. Store Railway Deploy Bot GitHub App credentials in OpenBao."
   exit 1
@@ -15,6 +17,7 @@ auth_path="${OPENBAO_AUTH_PATH:-jwt}"
 audience="${OPENBAO_AUDIENCE:-openbao}"
 role="${OPENBAO_ROLE:-github-actions-railway-deployments-${repo_name}}"
 secret_path="${OPENBAO_SECRET_PATH:-secret/data/github-apps/railway-deploy-bot}"
+
 
 retry_curl() {
   local attempt delay body_file status curl_exit

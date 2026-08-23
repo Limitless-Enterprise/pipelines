@@ -8,6 +8,10 @@ set -euo pipefail
 
 preview_branch="preview/${DEPLOYMENTS_SERVICE}/${SOURCE_PR_NUMBER}"
 export GH_TOKEN="${DEPLOYMENTS_REPO_TOKEN}"
+# Force gh to use the OpenBao-minted railway-deployments installation token.
+# Some callers export GITHUB_TOKEN for the source repository; that token cannot
+# read or close pull requests in the deployment repository and fails with 403.
+unset GITHUB_TOKEN
 repo_owner="${DEPLOYMENTS_REPO%%/*}"
 
 lookup_open_preview_pr() {
