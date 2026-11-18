@@ -1,0 +1,518 @@
+# Security Baseline (W-0001) reusable scan workflow.
+#
+# Each owner has exactly one central workflow repo, and this file lives there
+# as .github/workflows/security-scan.yml (ADR 0001):
+#   Limitless-Enterprise/pipelines  (existing public repo)
+#   CorpDK/pipelines                (new, public)
+#   Dave4272-Office/pipelines       (new, public)
+# Every repo of that owner calls its own owner's copy from
+# .github/workflows/security.yml, pinned by commit SHA. Nothing is shared
+# across owners. The central repos are public because GitHub lets public
+# callers use reusable workflows from public repos only.
+#
+# Only GitHub-owned actions (actions/*) are used, so the workflow runs under
+# a "GitHub-owned actions only" allowlist in any owner.
+#
+# Jobs:
+#   trivy       dependencies (vuln), IaC/config (misconfig), container images
+#               built locally from Dockerfiles, and a CycloneDX SBOM.
+#   trufflehog  secrets in the commits of this PR or push; full history on
+#               workflow_dispatch. Output is redacted on the runner.
+#   comment     one sticky PR comment for same-repo PRs. It has no checkout
+#               and only reads the summary artifacts.
+#
+# Supply chain: every action is pinned by commit SHA. Trivy and TruffleHog
+# come from release tarballs whose SHA-256 is pinned below. A pin bump is a
+# reviewed PR made with pipelines/scripts/bump-tool-pins.sh, which checks the
+# Sigstore attestation or signature before it prints new values.
+name: security-scan
+
+on:
+  workflow_call:
+    inputs:
+      trivy:
+        description: Run the Trivy job. false = TruffleHog only (docs and config repos where Trivy has nothing to read).
+        type: boolean
+        default: true
+      enforce-vulns:
+        description: Fail the trivy job on CRITICAL vulnerabilities that have a fixed version.
+        type: boolean
+        default: false
+      enforce-secrets:
+        description: Fail the trufflehog job on verified secrets.
+        type: boolean
+        default: false
+      misconfig:
+        description: Run Trivy's IaC/config scanner (report-only in every phase).
+        type: boolean
+        default: true
+      image-scan:
+        description: "auto = build and scan ./Dockerfile if present, or the paths in `dockerfiles`; off = skip."
+        type: string
+        default: auto
+      dockerfiles:
+        description: "Newline-separated `path/to/Dockerfile[:context-dir]` entries. Empty means ./Dockerfile only."
+        type: string
+        default: ""
+      skip-dirs:
+        description: Comma-separated directories Trivy skips (vendored code, fixtures).
+        type: string
+        default: ""
+      trufflehog-exclude-file:
+        description: Repo file with path regexes that TruffleHog skips (one per line).
+        type: string
+        default: .trufflehog-exclude
+      retention-days:
+        description: Artifact retention in days. Callers run only on PR and push, so idle repos keep their last result this long.
+        type: number
+        default: 90
+
+permissions: {}
+
+env:
+  PIPELINE_VERSION: 0.1.0
+  TRIVY_VERSION: 0.76.2
+  TRIVY_SHA256: bc0fc726e017b8927a62b2d3531d7a84ee01769daf5c99ed866dced54089fdbf
+  TRUFFLEHOG_VERSION: 3.99.9
+  TRUFFLEHOG_SHA256: 12050095c8063bf4d34f9f6cbce6ba9fa8d0deea9d503d0570364feba093658e
+
+jobs:
+  trivy:
+    name: trivy
+    if: inputs.trivy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read # check out the caller repo; nothing is written
+    steps:
+      - name: Check out caller repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Trivy (pinned SHA-256)
+        run: |
+          set -euo pipefail
+          url="https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          curl -fsSL --retry 3 --proto '=https' -o "$RUNNER_TEMP/trivy.tgz" "$url"
+          echo "${TRIVY_SHA256}  $RUNNER_TEMP/trivy.tgz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xzf "$RUNNER_TEMP/trivy.tgz" -C "$RUNNER_TEMP/bin" trivy
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Compute DB cache key
+        id: day
+        run: echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore Trivy DB cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/trivy-cache
+          key: trivy-db-${{ steps.day.outputs.date }}
+          restore-keys: trivy-db-
+
+      - name: Scan filesystem
+        env:
+          TRIVY_CACHE_DIR: ${{ runner.temp }}/trivy-cache
+          TRIVY_DISABLE_TELEMETRY: "true"
+          IN_MISCONFIG: ${{ inputs.misconfig }}
+          IN_SKIP_DIRS: ${{ inputs.skip-dirs }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/out"; mkdir -p "$out"
+          scanners=vuln
+          if [ "$IN_MISCONFIG" = "true" ]; then scanners=vuln,misconfig; fi
+          # Secret scanning is TruffleHog's job. Trivy's secret scanner stays off
+          # so secret material never lands in Trivy reports.
+          args=(fs --scanners "$scanners" --list-all-pkgs --format json
+                --output "$out/trivy-fs.json" --timeout 15m --no-progress)
+          if [ -f .trivyignore.yaml ]; then args+=(--ignorefile .trivyignore.yaml); fi
+          if [ -n "$IN_SKIP_DIRS" ]; then args+=(--skip-dirs "$IN_SKIP_DIRS"); fi
+          trivy "${args[@]}" .
+          trivy convert --format cyclonedx --output "$out/sbom.cdx.json" "$out/trivy-fs.json"
+
+      - name: Build and scan container images
+        if: inputs.image-scan != 'off'
+        env:
+          TRIVY_CACHE_DIR: ${{ runner.temp }}/trivy-cache
+          TRIVY_DISABLE_TELEMETRY: "true"
+          IN_DOCKERFILES: ${{ inputs.dockerfiles }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/out"; : > "$out/images.tsv"
+          entries=()
+          if [ -n "$IN_DOCKERFILES" ]; then
+            mapfile -t entries <<< "$IN_DOCKERFILES"
+          elif [ -f Dockerfile ]; then
+            entries=(Dockerfile)
+          fi
+          i=0
+          for entry in "${entries[@]}"; do
+            entry="${entry%%#*}"; entry="$(echo "$entry" | xargs)"
+            [ -z "$entry" ] && continue
+            file="${entry%%:*}"; ctx="$(dirname "$file")"
+            if [ "$entry" != "$file" ]; then ctx="${entry#*:}"; fi
+            i=$((i + 1)); tag="security-baseline/scan-$i:${GITHUB_SHA}"
+            # Build output is not kept: RUN steps can print anything.
+            if docker build --pull --file "$file" --tag "$tag" "$ctx" > /dev/null 2>&1; then
+              trivy image --scanners vuln --format json --no-progress --timeout 15m \
+                --output "$out/trivy-image-$i.json" "$tag"
+              printf '%s\t%s\tscanned\n' "$i" "$file" >> "$out/images.tsv"
+            else
+              echo "::warning title=security-baseline::docker build failed for ${file}; image not scanned"
+              printf '%s\t%s\tbuild-failed\n' "$i" "$file" >> "$out/images.tsv"
+            fi
+          done
+
+      - name: Summarise and gate
+        id: gate
+        if: always()
+        env:
+          IN_ENFORCE: ${{ inputs.enforce-vulns }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          python3 -I - <<'PY'
+          import json, os, glob, datetime
+
+          out = os.path.join(os.environ["RUNNER_TEMP"], "out")
+          os.makedirs(out, exist_ok=True)
+          enforce = os.environ["IN_ENFORCE"] == "true"
+
+          def cell(s, n=80):
+              s = str(s or "").replace("|", "\\|").replace("<", "&lt;").replace(">", "&gt;").replace("\n", " ")
+              return s[:n]
+
+          reports = []
+          for path in sorted(glob.glob(os.path.join(out, "trivy-*.json"))):
+              with open(path) as f:
+                  data = json.load(f)
+              # Drop misconfig code snippets: they can quote credential-looking lines.
+              for res in data.get("Results") or []:
+                  for m in res.get("Misconfigurations") or []:
+                      (m.get("CauseMetadata") or {}).pop("Code", None)
+              with open(path, "w") as f:
+                  json.dump(data, f)
+              reports.append((os.path.basename(path)[6:-5], data))
+
+          sev = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"]
+          vuln = {s: 0 for s in sev}
+          mis = {s: 0 for s in sev}
+          blocking = []
+          for source, data in reports:
+              for res in data.get("Results") or []:
+                  for v in res.get("Vulnerabilities") or []:
+                      s = v.get("Severity", "UNKNOWN")
+                      vuln[s] = vuln.get(s, 0) + 1
+                      if s == "CRITICAL" and v.get("FixedVersion"):
+                          blocking.append((source, res.get("Target"), v))
+                  for m in res.get("Misconfigurations") or []:
+                      if m.get("Status") == "FAIL":
+                          s = m.get("Severity", "UNKNOWN")
+                          mis[s] = mis.get(s, 0) + 1
+
+          images = []
+          tsv = os.path.join(out, "images.tsv")
+          if os.path.exists(tsv):
+              images = [l.rstrip("\n").split("\t") for l in open(tsv) if l.strip()]
+
+          summary = {
+              "schema": "w0001.trivy-summary.v1",
+              "pipeline_version": os.environ.get("PIPELINE_VERSION"),
+              "trivy_version": os.environ.get("TRIVY_VERSION"),
+              "repository": os.environ["REPO"],
+              "sha": os.environ.get("GITHUB_SHA"),
+              "ref": os.environ["REF"],
+              "event": os.environ["EVENT"],
+              "run_id": int(os.environ["RUN_ID"]),
+              "run_attempt": int(os.environ["RUN_ATTEMPT"]),
+              "scanned_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+              "reports": [r[0] for r in reports],
+              "vulnerabilities": vuln,
+              "misconfigurations": mis,
+              "blocking_count": len(blocking),
+              "enforced": enforce,
+              "images": [{"index": i[0], "dockerfile": i[1], "status": i[2]} for i in images],
+          }
+          with open(os.path.join(out, "summary.json"), "w") as f:
+              json.dump(summary, f, indent=1)
+
+          state = "blocking" if (blocking and enforce) else ("report-only" if blocking else "clean")
+          md = [f"### Trivy: {len(blocking)} CRITICAL with a fix ({state})", ""]
+          md.append("| | " + " | ".join(sev) + " |")
+          md.append("|---|" + "---|" * len(sev))
+          md.append("| Vulnerabilities | " + " | ".join(str(vuln[s]) for s in sev) + " |")
+          md.append("| Misconfigurations | " + " | ".join(str(mis[s]) for s in sev) + " |")
+          if images:
+              md += ["", "Images: " + ", ".join(f"`{cell(i[1])}` {i[2]}" for i in images)]
+          if blocking:
+              md += ["", "| Source | Target | Package | Installed | Fixed | ID |", "|---|---|---|---|---|---|"]
+              for source, target, v in blocking[:25]:
+                  md.append(f"| {cell(source)} | {cell(target)} | {cell(v.get('PkgName'))} | {cell(v.get('InstalledVersion'))} | {cell(v.get('FixedVersion'))} | {cell(v.get('VulnerabilityID'))} |")
+              if len(blocking) > 25:
+                  md.append(f"| … {len(blocking) - 25} more in the artifact | | | | | |")
+          md += ["", "Ignore a finding only in `.trivyignore.yaml`, with `statement` and `expired_at`. "
+                 f"Pipeline {summary['pipeline_version']}, Trivy {summary['trivy_version']}."]
+          text = "\n".join(md) + "\n"
+          with open(os.path.join(out, "summary.md"), "w") as f:
+              f.write(text)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write(text)
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"blocking={len(blocking)}\n")
+          PY
+
+      - name: Upload Trivy artifact
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: security-baseline-trivy
+          path: |
+            ${{ runner.temp }}/out/summary.json
+            ${{ runner.temp }}/out/summary.md
+            ${{ runner.temp }}/out/trivy-*.json
+            ${{ runner.temp }}/out/sbom.cdx.json
+            ${{ runner.temp }}/out/images.tsv
+          retention-days: ${{ inputs.retention-days }}
+          if-no-files-found: warn
+
+      - name: Enforce
+        if: inputs.enforce-vulns && steps.gate.outputs.blocking != '0'
+        env:
+          BLOCKING: ${{ steps.gate.outputs.blocking }}
+        run: |
+          echo "::error title=security-baseline::${BLOCKING} CRITICAL vulnerabilities with a fixed version"
+          exit 1
+
+  trufflehog:
+    name: trufflehog
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read # check out the caller repo; nothing is written
+    steps:
+      - name: Check out caller repo (full history)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install TruffleHog (pinned SHA-256)
+        run: |
+          set -euo pipefail
+          url="https://github.com/trufflesecurity/trufflehog/releases/download/v${TRUFFLEHOG_VERSION}/trufflehog_${TRUFFLEHOG_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL --retry 3 --proto '=https' -o "$RUNNER_TEMP/trufflehog.tgz" "$url"
+          echo "${TRUFFLEHOG_SHA256}  $RUNNER_TEMP/trufflehog.tgz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xzf "$RUNNER_TEMP/trufflehog.tgz" -C "$RUNNER_TEMP/bin" trufflehog
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Scan and redact
+        id: scan
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.event.after }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          IS_PRIVATE: ${{ github.event.repository.private }}
+          IN_EXCLUDE: ${{ inputs.trufflehog-exclude-file }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          REF: ${{ github.ref }}
+        run: |
+          set -uo pipefail
+          out="$RUNNER_TEMP/out"; mkdir -p "$out"
+          raw="$RUNNER_TEMP/th-raw.jsonl"
+          # shellcheck disable=SC2054 # commas are part of one flag value
+          args=(git "file://$GITHUB_WORKSPACE" --results=verified,unknown --json --no-update --no-color)
+          mode="full"
+          case "$EVENT" in
+            pull_request)
+              args+=(--since-commit "$PR_BASE" --branch "$PR_HEAD"); mode="diff" ;;
+            push)
+              if [ -n "$PUSH_BEFORE" ] && [ "$PUSH_BEFORE" != "0000000000000000000000000000000000000000" ] \
+                 && git cat-file -e "${PUSH_BEFORE}^{commit}" 2>/dev/null; then
+                args+=(--since-commit "$PUSH_BEFORE" --branch "$PUSH_AFTER"); mode="diff"
+              elif base="$(git merge-base "origin/$DEFAULT_BRANCH" "$PUSH_AFTER" 2>/dev/null)" \
+                   && [ "$base" != "$PUSH_AFTER" ]; then
+                args+=(--since-commit "$base" --branch "$PUSH_AFTER"); mode="diff"
+              else
+                args+=(--branch "$PUSH_AFTER")
+              fi ;;
+          esac
+          if [ -f "$IN_EXCLUDE" ]; then args+=(--exclude-paths "$IN_EXCLUDE"); fi
+          # stdout carries raw secrets: it goes only to a temp file that the
+          # redactor reads and deletes. stderr is not echoed either.
+          trufflehog "${args[@]}" > "$raw" 2> "$RUNNER_TEMP/th-stderr.log"
+          rc=$?
+          if [ "$rc" -ne 0 ] && [ "$rc" -ne 183 ]; then
+            echo "::error title=security-baseline::trufflehog exited ${rc}; stderr suppressed (may contain secret material)"
+            shred -u "$raw" "$RUNNER_TEMP/th-stderr.log" 2>/dev/null || rm -f "$raw" "$RUNNER_TEMP/th-stderr.log"
+            exit 1
+          fi
+          rm -f "$RUNNER_TEMP/th-stderr.log"
+          MODE="$mode" python3 -I - "$raw" <<'PY'
+          import hashlib, json, os, sys, datetime
+
+          raw_path = sys.argv[1]
+          out = os.path.join(os.environ["RUNNER_TEMP"], "out")
+          # ADR 0005 allowlist. Nothing outside these keys may leave the runner.
+          records, secrets = [], []
+          with open(raw_path) as f:
+              for line in f:
+                  line = line.strip()
+                  if not line.startswith("{"):
+                      continue
+                  r = json.loads(line)
+                  git = ((r.get("SourceMetadata") or {}).get("Data") or {}).get("Git") or {}
+                  for k in ("Raw", "RawV2", "Redacted"):
+                      if r.get(k):
+                          secrets.append(str(r[k]))
+                  detector = str(r.get("DetectorName") or "unknown")
+                  commit, path, lineno = str(git.get("commit") or ""), str(git.get("file") or ""), int(git.get("line") or 0)
+                  fp = hashlib.sha256(f"{detector}|{commit}|{path}|{lineno}".encode()).hexdigest()
+                  records.append({
+                      "schema": "w0001.trufflehog-finding.v1",
+                      "detector": detector,
+                      "detector_type": r.get("DetectorType"),
+                      "decoder": r.get("DecoderName"),
+                      "verified": bool(r.get("Verified")),
+                      "verification_error": bool(r.get("VerificationError")),
+                      "file": path,
+                      "line": lineno,
+                      "commit": commit,
+                      "committed_at": git.get("timestamp"),
+                      "fingerprint": fp,
+                  })
+          text = "".join(json.dumps(x, sort_keys=True) + "\n" for x in records)
+          # Leak check: no secret value (6+ chars) may appear in the redacted output.
+          for s in secrets:
+              for part in [s] + s.split(":"):
+                  if len(part) >= 6 and part in text:
+                      print("::error title=security-baseline::redaction check failed; no output written")
+                      sys.exit(2)
+          with open(os.path.join(out, "trufflehog-findings.jsonl"), "w") as f:
+              f.write(text)
+
+          verified = [x for x in records if x["verified"]]
+          unknown = [x for x in records if not x["verified"] and x["verification_error"]]
+          unverified = [x for x in records if not x["verified"] and not x["verification_error"]]
+          summary = {
+              "schema": "w0001.trufflehog-summary.v1",
+              "pipeline_version": os.environ.get("PIPELINE_VERSION"),
+              "trufflehog_version": os.environ.get("TRUFFLEHOG_VERSION"),
+              "repository": os.environ["REPO"],
+              "sha": os.environ.get("GITHUB_SHA"),
+              "ref": os.environ["REF"],
+              "event": os.environ["EVENT"],
+              "mode": os.environ["MODE"],
+              "run_id": int(os.environ["RUN_ID"]),
+              "run_attempt": int(os.environ["RUN_ATTEMPT"]),
+              "scanned_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+              "verified": len(verified),
+              "unknown": len(unknown),
+              "unverified": len(unverified),
+          }
+          with open(os.path.join(out, "trufflehog-summary.json"), "w") as f:
+              json.dump(summary, f, indent=1)
+
+          private = os.environ.get("IS_PRIVATE") == "true"
+          md = [f"### TruffleHog ({summary['mode']} scan): {len(verified)} verified, {len(unknown)} unknown", ""]
+          if records and private:
+              md += ["| Detector | File | Line | Commit | Verified |", "|---|---|---|---|---|"]
+              for x in sorted(records, key=lambda x: not x["verified"])[:25]:
+                  f_ = x["file"].replace("|", "\\|").replace("<", "&lt;")[:100]
+                  md.append(f"| {x['detector']} | `{f_}` | {x['line']} | {x['commit'][:10]} | {'yes' if x['verified'] else ('unknown' if x['verification_error'] else 'no')} |")
+          elif records:
+              by = {}
+              for x in records:
+                  by[x["detector"]] = by.get(x["detector"], 0) + 1
+              md.append("Public repo: locations are omitted here. Detectors: "
+                        + ", ".join(f"{k} ×{v}" for k, v in sorted(by.items())))
+              md.append("Run `trufflehog git file://. --results=verified,unknown` locally to locate them.")
+          if verified:
+              md += ["", "**A verified secret is live. Rotate it first; removing it from git does not revoke it.** "
+                     "Runbook: srs `cross-app/W-0001-security-baseline/05-planning/history-sweep-and-rotation.md`."]
+          text = "\n".join(md) + "\n"
+          with open(os.path.join(out, "summary.md"), "w") as f:
+              f.write(text)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write(text)
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"verified={len(verified)}\n")
+          PY
+          prc=$?
+          shred -u "$raw" 2>/dev/null || rm -f "$raw"
+          exit "$prc"
+
+      - name: Upload redacted TruffleHog artifact
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: security-baseline-trufflehog
+          path: |
+            ${{ runner.temp }}/out/trufflehog-summary.json
+            ${{ runner.temp }}/out/trufflehog-findings.jsonl
+            ${{ runner.temp }}/out/summary.md
+          retention-days: ${{ inputs.retention-days }}
+          if-no-files-found: warn
+
+      - name: Enforce
+        if: inputs.enforce-secrets && steps.scan.outputs.verified != '0'
+        env:
+          VERIFIED: ${{ steps.scan.outputs.verified }}
+        run: |
+          echo "::error title=security-baseline::${VERIFIED} verified secrets"
+          exit 1
+
+  comment:
+    name: comment
+    needs: [trivy, trufflehog]
+    if: >-
+      always() &&
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write # upsert the sticky comment; no checkout in this job
+    steps:
+      - name: Download summaries
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: security-baseline-*
+          path: ${{ runner.temp }}/in
+
+      - name: Upsert sticky comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          marker='<!-- security-baseline:w0001 -->'
+          body="$RUNNER_TEMP/body.md"
+          {
+            echo "$marker"
+            echo "## Security Baseline"
+            for f in "$RUNNER_TEMP/in/security-baseline-trivy/summary.md" "$RUNNER_TEMP/in/security-baseline-trufflehog/summary.md"; do
+              if [ -f "$f" ]; then echo; cat "$f"; fi
+            done
+            echo
+            echo "[Run details and artifacts]($RUN_URL)"
+          } > "$body"
+          id="$(gh api --paginate "repos/$REPO/issues/$PR/comments" \
+                --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$marker\"))) | .id" | head -n1)"
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$id" -F "body=@$body" > /dev/null
+          else
+            gh api -X POST "repos/$REPO/issues/$PR/comments" -F "body=@$body" > /dev/null
+          fi

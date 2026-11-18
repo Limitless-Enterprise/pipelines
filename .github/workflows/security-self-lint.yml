@@ -1,0 +1,61 @@
+# Lints the Security Baseline workflow files of this central repo with
+# actionlint and zizmor. Scoped to the security-* files so other workflows in
+# the same repo (e.g. LE preview pipelines) are not linted by it.
+# zizmorcore/zizmor-action must be on the owner's allowed-actions list.
+name: security-self-lint
+
+on:
+  # No path filter: these jobs are required status checks, so they must
+  # report on every PR. They lint only the security-* files.
+  pull_request:
+  push:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: security-self-lint-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ACTIONLINT_VERSION: 1.7.12
+  ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+
+jobs:
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read # check out this repo only
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install actionlint (pinned SHA-256)
+        run: |
+          set -euo pipefail
+          url="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL --retry 3 --proto '=https' -o "$RUNNER_TEMP/al.tgz" "$url"
+          echo "${ACTIONLINT_SHA256}  $RUNNER_TEMP/al.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/al.tgz" -C "$RUNNER_TEMP" actionlint
+      - name: Run actionlint
+        run: '"$RUNNER_TEMP/actionlint" -color .github/workflows/security-scan.yml .github/workflows/security-self-lint.yml'
+
+  zizmor:
+    name: zizmor
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read # check out this repo only
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run zizmor
+        uses: zizmorcore/zizmor-action@45d7276c9ca790aabd705e31ca99c6185c3e76dd # v0.8.1
+        with:
+          version: 1.32.0
+          persona: pedantic
+          inputs: .github/workflows/security-scan.yml .github/workflows/security-self-lint.yml
+          advanced-security: false
