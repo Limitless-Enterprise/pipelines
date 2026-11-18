@@ -1,0 +1,4 @@
+# Security Baseline (W-0001) workflow files need review by the owner.
+/.github/workflows/security-scan.yml @dave4272-lle
+/.github/workflows/security-self-lint.yml @dave4272-lle
+/.github/CODEOWNERS @dave4272-lle

@@ -1,0 +1,15 @@
+# Keeps the SHA pins of this repo's actions current. Tool tarball pins
+# (Trivy, TruffleHog, actionlint) are bumped with bump-tool-pins.sh instead.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    # Wait a week after a release before proposing it: hijacked releases are
+    # usually caught and pulled within days.
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
